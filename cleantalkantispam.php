@@ -124,6 +124,10 @@ class CleantalkAntispam extends Module
 
     public function hookActionSubmitAccountBefore($params)
     {
+        if ( ! Configuration::get('CLEANTALKANTISPAM_API_KEY') ) {
+            return true;
+        }
+
         $ct_request = new CleantalkRequest;
 
         $data = Tools::getAllValues();
