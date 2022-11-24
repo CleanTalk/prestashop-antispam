@@ -1,0 +1,18 @@
+{
+    "name": "cleantalk/prestashop-antispam",
+    "license": "GPL-3.0-or-later",
+    "authors": [
+        {
+            "name": "CleanTalk Developers Team",
+            "email": "plugins@cleantalk.org"
+        }
+    ],
+    "require": {
+        "cleantalk/antispam": "^1.3"
+    },
+    "config": {
+        "allow-plugins": {
+            "cleantalk/apbct-installer": true
+        }
+    }
+}
