@@ -13,13 +13,13 @@ require_once __DIR__ . '/lib/autoload.php';
 
 class CleantalkAntispam extends Module
 {
-    public const ENGINE = 'prestashop-1.0.0';
+    public const ENGINE = 'prestashop-1.1.0';
 
     public function __construct()
     {
         $this->name = 'cleantalkantispam';
         $this->tab = 'administration';
-        $this->version = '1.0.0';
+        $this->version = '1.1.0';
         $this->author = 'CleanTalk Developers Team';
         $this->need_instance = 0;
         $this->ps_versions_compliancy = [
@@ -39,7 +39,8 @@ class CleantalkAntispam extends Module
     public function install()
     {
         return parent::install()
-            && $this->registerHook('actionSubmitAccountBefore');
+            && $this->registerHook('actionSubmitAccountBefore')
+            && $this->registerHook('actionFrontControllerInitAfter');
     }
 
     public function uninstall()
@@ -124,13 +125,29 @@ class CleantalkAntispam extends Module
 
     public function hookActionSubmitAccountBefore($params)
     {
+        $data = Tools::getAllValues();
+        return $this->checkSpam($data, true);
+    }
+
+    public function hookActionFrontControllerInitAfter(&$params)
+    {
+        // Contact Form integration
+        if ( Tools::isSubmit('submitMessage') && isset($params['controller']) && $params['controller'] instanceof \ContactController ) {
+            $form_data = Tools::getAllValues();
+            $data['email'] = isset($form_data['from']) ? $form_data['from'] : '';
+            $data['message'] = isset($form_data['message']) ? $form_data['message'] : '';
+            return $this->checkSpam($data);
+        }
+        return true;
+    }
+
+    private function checkSpam($data, $is_check_register = false)
+    {
         if ( ! Configuration::get('CLEANTALKANTISPAM_API_KEY') ) {
             return true;
         }
 
         $ct_request = new CleantalkRequest;
-
-        $data = Tools::getAllValues();
 
         $ct_request->auth_key        = Configuration::get('CLEANTALKANTISPAM_API_KEY');
         $ct_request->agent           = self::ENGINE;
@@ -148,11 +165,12 @@ class CleantalkAntispam extends Module
         $ct_request->sender_email = isset($data['email']) ? $data['email'] : '';
         $ct_request->sender_nickname = isset($data['firstname']) ? $data['firstname'] : '';
         $ct_request->sender_nickname .= isset($data['lastname']) ? ' ' . $data['lastname'] : '';
+        $ct_request->message = isset($data['message']) ? ' ' . $data['message'] : '';
 
         $ct                 = new Cleantalk();
         $ct->server_url     = 'https://moderate.cleantalk.org';
 
-        $result = $ct->isAllowUser($ct_request);
+        $result = $is_check_register ? $ct->isAllowUser($ct_request) : $ct->isAllowMessage($ct_request);
         $result = json_decode(json_encode($result), true);
 
         if ($result['allow'] == 0) {
