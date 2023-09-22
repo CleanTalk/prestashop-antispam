@@ -13,13 +13,16 @@ require_once __DIR__ . '/lib/autoload.php';
 
 class CleantalkAntispam extends Module
 {
-    public const ENGINE = 'prestashop-1.1.0';
+    private const PLUGIN_VERSION = '1.2.0';
+
+    private string $engine;
 
     public function __construct()
     {
         $this->name = 'cleantalkantispam';
         $this->tab = 'administration';
-        $this->version = '1.1.0';
+        $this->version = self::PLUGIN_VERSION;
+        $this->engine = 'prestashop-' . $this->version;
         $this->author = 'CleanTalk Developers Team';
         $this->need_instance = 0;
         $this->ps_versions_compliancy = [
@@ -150,7 +153,7 @@ class CleantalkAntispam extends Module
         $ct_request = new CleantalkRequest;
 
         $ct_request->auth_key        = Configuration::get('CLEANTALKANTISPAM_API_KEY');
-        $ct_request->agent           = self::ENGINE;
+        $ct_request->agent           = $this->engine;
 
         $ct_request->sender_ip       = \Cleantalk\Common\Helper\Helper::ipGet('real', false);
         $ct_request->x_forwarded_for = \Cleantalk\Common\Helper\Helper::ipGet('x_forwarded_for', false);
