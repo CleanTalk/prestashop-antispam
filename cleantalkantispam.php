@@ -43,7 +43,8 @@ class CleantalkAntispam extends Module
     {
         return parent::install()
             && $this->registerHook('actionSubmitAccountBefore')
-            && $this->registerHook('actionFrontControllerInitAfter');
+            && $this->registerHook('actionFrontControllerInitAfter')
+            && $this->registerHook('actionValidateOrder');
     }
 
     public function uninstall()
@@ -129,19 +130,59 @@ class CleantalkAntispam extends Module
     public function hookActionSubmitAccountBefore($params)
     {
         $data = Tools::getAllValues();
-        return $this->checkSpam($data, true);
+        $cleantalk_check = $this->checkSpam($data, true);
+        if ( $cleantalk_check['allow'] == 0 ) {
+            $this->doBlockPage($cleantalk_check['comment']);
+        }
     }
 
     public function hookActionFrontControllerInitAfter(&$params)
     {
+        // Getting data from the request
+        $form_data = Tools::getAllValues();
+
         // Contact Form integration
         if ( Tools::isSubmit('submitMessage') && isset($params['controller']) && $params['controller'] instanceof \ContactController ) {
-            $form_data = Tools::getAllValues();
             $data['email'] = isset($form_data['from']) ? $form_data['from'] : '';
             $data['message'] = isset($form_data['message']) ? $form_data['message'] : '';
-            return $this->checkSpam($data);
+            $cleantalk_check = $this->checkSpam($data);
+            if ( $cleantalk_check['allow'] == 0 ) {
+                $this->doBlockPage($cleantalk_check['comment']);
+            }
         }
+
+        // Registration during checkout
+        if (
+            isset($form_data['password'], $form_data['id_gender'], $form_data['firstname'], $form_data['lastname']) &&
+            ! empty($form_data['password']) &&
+            $params['controller'] instanceof \OrderController
+        ) {
+            $this->hookActionSubmitAccountBefore($params);
+        }
+
         return true;
+    }
+
+    public function hookActionValidateOrder($params)
+    {
+        $order = $params['order'];
+        $customer = $params['customer'];
+
+        // There is the NEW order
+        if ( is_null($order->getCurrentOrderState()) ) {
+            $data['email'] = $customer->email;
+            $data['firstname'] = $customer->firstname;
+            $data['lastname'] = $customer->lastname;
+            $data['message'] = ! is_null($customer->note) ? $customer->note : '';
+            $data['post_info']['comment_type'] = 'order';
+            $cleantalk_check = $this->checkSpam($data);
+            if ( $cleantalk_check['allow'] == 0 ) {
+                $history = new OrderHistory();
+                $history->id_order = (int) $order->id;
+                $history->changeIdOrderState(Configuration::get('PS_OS_CANCELED'), $order);
+                $this->doBlockPage($cleantalk_check['comment']);
+            }
+        }
     }
 
     private function checkSpam($data, $is_check_register = false)
@@ -168,7 +209,8 @@ class CleantalkAntispam extends Module
         $ct_request->sender_email = isset($data['email']) ? $data['email'] : '';
         $ct_request->sender_nickname = isset($data['firstname']) ? $data['firstname'] : '';
         $ct_request->sender_nickname .= isset($data['lastname']) ? ' ' . $data['lastname'] : '';
-        $ct_request->message = isset($data['message']) ? ' ' . $data['message'] : '';
+        $ct_request->message = isset($data['message']) ? $data['message'] : '';
+        $ct_request->post_info = isset($data['post_info']) ? $data['post_info'] : '';
 
         $ct                 = new Cleantalk();
         $ct->server_url     = 'https://moderate.cleantalk.org';
@@ -176,29 +218,31 @@ class CleantalkAntispam extends Module
         $result = $is_check_register ? $ct->isAllowUser($ct_request) : $ct->isAllowMessage($ct_request);
         $result = json_decode(json_encode($result), true);
 
-        if ($result['allow'] == 0) {
-            $ct_die_page = file_get_contents(Cleantalk::getLockPageFile());
+        return $result;
+    }
 
-            $message_title = '<b style="color: #49C73B;">Clean</b><b style="color: #349ebf;">Talk.</b> Spam protection';
-            $back_script = '<script>setTimeout("history.back()", 5000);</script>';
-            $back_link = '';
-            if ( isset($_SERVER['HTTP_REFERER']) ) {
-                $back_link = '<a href="' . Sanitize::cleanUrl(Server::get('HTTP_REFERER')) . '">Back</a>';
-            }
+    private function doBlockPage($message)
+    {
+        $ct_die_page = file_get_contents(Cleantalk::getLockPageFile());
 
-            // Translation
-            $replaces = array(
-                '{MESSAGE_TITLE}' => $message_title,
-                '{MESSAGE}'       => $result['comment'],
-                '{BACK_LINK}'     => $back_link,
-                '{BACK_SCRIPT}'   => $back_script
-            );
-
-            foreach ( $replaces as $place_holder => $replace ) {
-                $ct_die_page = str_replace($place_holder, $replace, $ct_die_page);
-            }
-            die($ct_die_page);
+        $message_title = '<b style="color: #49C73B;">Clean</b><b style="color: #349ebf;">Talk.</b> Spam protection';
+        $back_script = '<script>setTimeout("history.back()", 5000);</script>';
+        $back_link = '';
+        if ( isset($_SERVER['HTTP_REFERER']) ) {
+            $back_link = '<a href="' . Sanitize::cleanUrl(Server::get('HTTP_REFERER')) . '">Back</a>';
         }
-        return true;
+
+        // Translation
+        $replaces = array(
+            '{MESSAGE_TITLE}' => $message_title,
+            '{MESSAGE}'       => $message,
+            '{BACK_LINK}'     => $back_link,
+            '{BACK_SCRIPT}'   => $back_script
+        );
+
+        foreach ( $replaces as $place_holder => $replace ) {
+            $ct_die_page = str_replace($place_holder, $replace, $ct_die_page);
+        }
+        die($ct_die_page);
     }
 }
