@@ -44,7 +44,8 @@ class CleantalkAntispam extends Module
         return parent::install()
             && $this->registerHook('actionSubmitAccountBefore')
             && $this->registerHook('actionFrontControllerInitAfter')
-            && $this->registerHook('actionValidateOrder');
+            && $this->registerHook('actionValidateOrder')
+            && $this->registerHook('actionNewsletterRegistrationBefore');
     }
 
     public function uninstall()
@@ -182,6 +183,22 @@ class CleantalkAntispam extends Module
                 $history->changeIdOrderState(Configuration::get('PS_OS_CANCELED'), $order);
                 $this->doBlockPage($cleantalk_check['comment']);
             }
+        }
+    }
+
+    public function hookActionNewsletterRegistrationBefore($params)
+    {
+        $data = [];
+        $data['email'] = isset($params['email']) ? $params['email'] : '';
+        $cleantalk_check = $this->checkSpam($data);
+        if ($cleantalk_check['allow'] == 0) {
+            $resp = [
+                'nw_error' => true,
+                'msg' => $cleantalk_check['comment']
+            ];
+
+            echo json_encode($resp);
+            die();
         }
     }
 
