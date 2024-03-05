@@ -135,6 +135,7 @@ class CleantalkAntispam extends Module
         if ( $cleantalk_check['allow'] == 0 ) {
             $this->doBlockPage($cleantalk_check['comment']);
         }
+        return true;
     }
 
     public function hookActionFrontControllerInitAfter(&$params)
