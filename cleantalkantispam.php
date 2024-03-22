@@ -193,13 +193,7 @@ class CleantalkAntispam extends Module
         $data['email'] = isset($params['email']) ? $params['email'] : '';
         $cleantalk_check = $this->checkSpam($data);
         if ($cleantalk_check['allow'] == 0) {
-            $resp = [
-                'nw_error' => true,
-                'msg' => $cleantalk_check['comment']
-            ];
-
-            echo json_encode($resp);
-            die();
+            $params['hookError'] = $cleantalk_check['comment'];
         }
     }
 
