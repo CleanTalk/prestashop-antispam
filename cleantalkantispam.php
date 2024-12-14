@@ -42,16 +42,28 @@ class CleantalkAntispam extends Module
     public function install()
     {
         return parent::install()
+            && Configuration::updateValue('CLEANTALKANTISPAM_ENABLE_BOTDETECTOR', 1)
             && $this->registerHook('actionSubmitAccountBefore')
             && $this->registerHook('actionFrontControllerInitAfter')
             && $this->registerHook('actionValidateOrder')
-            && $this->registerHook('actionNewsletterRegistrationBefore');
+            && $this->registerHook('actionNewsletterRegistrationBefore')
+            && $this->registerHook('displayHeader');
     }
 
     public function uninstall()
     {
         return parent::uninstall()
+            && Configuration::deleteByName('CLEANTALKANTISPAM_ENABLE_BOTDETECTOR')
             && Configuration::deleteByName('CLEANTALKANTISPAM_API_KEY');
+    }
+
+    public function hookDisplayHeader()
+    {
+        if (Configuration::get('CLEANTALKANTISPAM_ENABLE_BOTDETECTOR')) {
+            return '<script src="https://moderate.cleantalk.org/ct-bot-detector-wrapper.js"></script>';
+        }
+
+        return '';
     }
 
     /**
@@ -66,6 +78,7 @@ class CleantalkAntispam extends Module
         if (Tools::isSubmit('submit' . $this->name)) {
             // retrieve the value set by the user
             $configValue = (string) Tools::getValue('CLEANTALKANTISPAM_API_KEY');
+            $enableJs = (int) Tools::getValue('CLEANTALKANTISPAM_ENABLE_BOTDETECTOR');
 
             // check that the value is valid
             if (empty($configValue) || !Validate::isGenericName($configValue)) {
@@ -74,6 +87,7 @@ class CleantalkAntispam extends Module
             } else {
                 // value is ok, update it and display a confirmation message
                 Configuration::updateValue('CLEANTALKANTISPAM_API_KEY', $configValue);
+                Configuration::updateValue('CLEANTALKANTISPAM_ENABLE_BOTDETECTOR', $enableJs);
                 $output = $this->displayConfirmation($this->l('Settings updated'));
             }
         }
@@ -102,7 +116,27 @@ class CleantalkAntispam extends Module
                         'size' => 20,
                         'required' => true,
                     ],
+                    [
+                        'type' => 'switch',
+                        'label' => $this->l('Enable CleanTalk JavaScript library'),
+                        'name' => 'CLEANTALKANTISPAM_ENABLE_BOTDETECTOR',
+                        'required' => false,
+                        'is_bool' => true,
+                        'values' => [
+                            [
+                                'id' => 'active_on',
+                                'value' => 1,
+                                'label' => $this->l('Yes')
+                            ],
+                            [
+                                'id' => 'active_off',
+                                'value' => 0,
+                                'label' => $this->l('No')
+                            ]
+                        ]
+                    ],
                 ],
+
                 'submit' => [
                     'title' => $this->l('Save'),
                     'class' => 'btn btn-default pull-right',
@@ -124,6 +158,7 @@ class CleantalkAntispam extends Module
 
         // Load current value into the form
         $helper->fields_value['CLEANTALKANTISPAM_API_KEY'] = Tools::getValue('CLEANTALKANTISPAM_API_KEY', Configuration::get('CLEANTALKANTISPAM_API_KEY'));
+        $helper->fields_value['CLEANTALKANTISPAM_ENABLE_BOTDETECTOR'] = Tools::getValue('CLEANTALKANTISPAM_ENABLE_BOTDETECTOR', Configuration::get('CLEANTALKANTISPAM_ENABLE_BOTDETECTOR'));
 
         return $helper->generateForm([$form]);
     }
@@ -147,6 +182,7 @@ class CleantalkAntispam extends Module
         if ( Tools::isSubmit('submitMessage') && isset($params['controller']) && $params['controller'] instanceof \ContactController ) {
             $data['email'] = isset($form_data['from']) ? $form_data['from'] : '';
             $data['message'] = isset($form_data['message']) ? $form_data['message'] : '';
+            $data['ct_bot_detector_event_token'] = isset($form_data['ct_bot_detector_event_token']) ? $form_data['ct_bot_detector_event_token'] : '';
             $cleantalk_check = $this->checkSpam($data);
             if ( $cleantalk_check['allow'] == 0 ) {
                 $this->doBlockPage($cleantalk_check['comment']);
@@ -191,6 +227,7 @@ class CleantalkAntispam extends Module
     {
         $data = [];
         $data['email'] = isset($params['email']) ? $params['email'] : '';
+        $data['ct_bot_detector_event_token'] = Tools::getValue('ct_bot_detector_event_token', '');
         $cleantalk_check = $this->checkSpam($data);
         if ($cleantalk_check['allow'] == 0) {
             $params['hookError'] = $cleantalk_check['comment'];
@@ -212,9 +249,6 @@ class CleantalkAntispam extends Module
         $ct_request->x_forwarded_for = \Cleantalk\Common\Helper\Helper::ipGet('x_forwarded_for', false);
         $ct_request->x_real_ip       = \Cleantalk\Common\Helper\Helper::ipGet('x_real_ip', false);
 
-        // @ToDo implement JS checking
-        //$ct_request->js_on           = $this->get_ct_checkjs($_COOKIE);
-
         // @ToDo implement SUBMIT TIME
         //$ct_request->submit_time     = $this->submit_time_test();
 
@@ -223,6 +257,7 @@ class CleantalkAntispam extends Module
         $ct_request->sender_nickname .= isset($data['lastname']) ? ' ' . $data['lastname'] : '';
         $ct_request->message = isset($data['message']) ? $data['message'] : '';
         $ct_request->post_info = isset($data['post_info']) ? $data['post_info'] : '';
+        $ct_request->event_token = isset($data['ct_bot_detector_event_token']) ? $data['ct_bot_detector_event_token'] : '';
 
         $ct                 = new Cleantalk();
         $ct->server_url     = 'https://moderate.cleantalk.org';
