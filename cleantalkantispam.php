@@ -15,7 +15,7 @@ class CleantalkAntispam extends Module
 {
     private const PLUGIN_VERSION = '1.2.0';
 
-    private string $engine;
+    private $engine;
 
     public function __construct()
     {
