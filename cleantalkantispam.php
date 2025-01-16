@@ -190,9 +190,7 @@ class CleantalkAntispam extends Module
         }
 
         // Registration during checkout
-        if (
-            isset($form_data['password'], $form_data['id_gender'], $form_data['firstname'], $form_data['lastname']) &&
-            ! empty($form_data['password']) &&
+        if (isset($form_data['id_gender'], $form_data['firstname'], $form_data['lastname']) &&
             $params['controller'] instanceof \OrderController
         ) {
             $this->hookActionSubmitAccountBefore($params);
