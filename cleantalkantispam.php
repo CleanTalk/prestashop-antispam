@@ -228,7 +228,22 @@ class CleantalkAntispam extends Module
         $data['ct_bot_detector_event_token'] = Tools::getValue('ct_bot_detector_event_token', '');
         $cleantalk_check = $this->checkSpam($data);
         if ($cleantalk_check['allow'] == 0) {
-            $params['hookError'] = $cleantalk_check['comment'];
+            $is_subscription_call = false;
+            $backtrace = false;
+            if (is_callable('debug_backtrace')) {
+                $backtrace = @debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS);
+            }
+            if (is_array($backtrace)) {
+                $backtrace = implode(",", array_map(function ($item) {
+                    return $item['class'];
+                }, $backtrace));
+                $is_subscription_call = strpos($backtrace, 'EmailsubscriptionSubscriptionModuleFrontController') !== false;
+            }
+            if ($is_subscription_call) {
+                $params['hookError'] = $cleantalk_check['comment'];
+                return;
+            }
+            die();
         }
     }
 
