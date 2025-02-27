@@ -3,6 +3,7 @@
 use Cleantalk\Common\Antispam\Cleantalk;
 use Cleantalk\Common\Antispam\CleantalkRequest;
 use Cleantalk\Common\Cleaner\Sanitize;
+use Cleantalk\Common\Helper\Helper;
 use Cleantalk\Common\Variables\Server;
 
 if (!defined('_PS_VERSION_')) {
@@ -182,7 +183,8 @@ class CleantalkAntispam extends Module
         if ( Tools::isSubmit('submitMessage') && isset($params['controller']) && $params['controller'] instanceof \ContactController ) {
             $data['email'] = isset($form_data['from']) ? $form_data['from'] : '';
             $data['message'] = isset($form_data['message']) ? $form_data['message'] : '';
-            $data['ct_bot_detector_event_token'] = isset($form_data['ct_bot_detector_event_token']) ? $form_data['ct_bot_detector_event_token'] : '';
+            $data['ct_bot_detector_event_token'] = Tools::getValue('ct_bot_detector_event_token', '');
+            $data['post_info']['comment_type'] = 'contact_form_prestashop_contact';
             $cleantalk_check = $this->checkSpam($data);
             if ( $cleantalk_check['allow'] == 0 ) {
                 $this->doBlockPage($cleantalk_check['comment']);
@@ -210,6 +212,7 @@ class CleantalkAntispam extends Module
             $data['firstname'] = $customer->firstname;
             $data['lastname'] = $customer->lastname;
             $data['message'] = ! is_null($customer->note) ? $customer->note : '';
+            $data['ct_bot_detector_event_token'] = Tools::getValue('ct_bot_detector_event_token', '');
             $data['post_info']['comment_type'] = 'order';
             $cleantalk_check = $this->checkSpam($data);
             if ( $cleantalk_check['allow'] == 0 ) {
@@ -226,6 +229,7 @@ class CleantalkAntispam extends Module
         $data = [];
         $data['email'] = isset($params['email']) ? $params['email'] : '';
         $data['ct_bot_detector_event_token'] = Tools::getValue('ct_bot_detector_event_token', '');
+        $data['post_info']['comment_type'] = 'contact_form_prestashop_newsletter';
         $cleantalk_check = $this->checkSpam($data);
         if ($cleantalk_check['allow'] == 0) {
             $is_subscription_call = false;
@@ -253,24 +257,30 @@ class CleantalkAntispam extends Module
             return true;
         }
 
-        $ct_request = new CleantalkRequest;
+        $sender_nickname = $data['nickname'] ?? '';
+        $sender_nickname .= isset($data['lastname']) ? ' ' . $data['lastname'] : '';
 
-        $ct_request->auth_key        = Configuration::get('CLEANTALKANTISPAM_API_KEY');
-        $ct_request->agent           = $this->engine;
+        $post_info = [
+            'post_url' => Server::get('HTTP_REFERER'),
+        ];
+        if ( isset($data['post_info']['comment_type']) ) {
+            $post_info['comment_type'] = $data['post_info']['comment_type'];
+        }
 
-        $ct_request->sender_ip       = \Cleantalk\Common\Helper\Helper::ipGet('real', false);
-        $ct_request->x_forwarded_for = \Cleantalk\Common\Helper\Helper::ipGet('x_forwarded_for', false);
-        $ct_request->x_real_ip       = \Cleantalk\Common\Helper\Helper::ipGet('x_real_ip', false);
+        $params = [
+            'auth_key'        => Configuration::get('CLEANTALKANTISPAM_API_KEY'),
+            'agent'           => $this->engine,
+            'sender_ip'       => Helper::ipGet('real', false),
+            'x_forwarded_for' => Helper::ipGet('x_forwarded_for', false),
+            'x_real_ip'       => Helper::ipGet('x_real_ip', false),
+            'sender_email'    => isset($data['email']) ? $data['email'] : '',
+            'sender_nickname' => $sender_nickname,
+            'message'         => isset($data['message']) ? $data['message'] : '',
+            'post_info'       => $post_info,
+            'event_token'     => isset($data['ct_bot_detector_event_token']) ? $data['ct_bot_detector_event_token'] : ''
+        ];
 
-        // @ToDo implement SUBMIT TIME
-        //$ct_request->submit_time     = $this->submit_time_test();
-
-        $ct_request->sender_email = isset($data['email']) ? $data['email'] : '';
-        $ct_request->sender_nickname = isset($data['firstname']) ? $data['firstname'] : '';
-        $ct_request->sender_nickname .= isset($data['lastname']) ? ' ' . $data['lastname'] : '';
-        $ct_request->message = isset($data['message']) ? $data['message'] : '';
-        $ct_request->post_info = isset($data['post_info']) ? $data['post_info'] : '';
-        $ct_request->event_token = isset($data['ct_bot_detector_event_token']) ? $data['ct_bot_detector_event_token'] : '';
+        $ct_request = new CleantalkRequest($params);
 
         $ct                 = new Cleantalk();
         $ct->server_url     = 'https://moderate.cleantalk.org';
