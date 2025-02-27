@@ -13,7 +13,7 @@ require_once __DIR__ . '/lib/autoload.php';
 
 class CleantalkAntispam extends Module
 {
-    private const PLUGIN_VERSION = '1.2.0';
+    private const PLUGIN_VERSION = '2.0.0';
 
     private $engine;
 
