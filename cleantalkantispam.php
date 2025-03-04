@@ -258,6 +258,7 @@ class CleantalkAntispam extends Module
         }
 
         $sender_nickname = $data['nickname'] ?? '';
+        $sender_nickname .= isset($data['firstname']) ? ' ' . $data['firstname'] : '';
         $sender_nickname .= isset($data['lastname']) ? ' ' . $data['lastname'] : '';
 
         $post_info = [
@@ -267,17 +268,23 @@ class CleantalkAntispam extends Module
             $post_info['comment_type'] = $data['post_info']['comment_type'];
         }
 
+        $sender_info = $this->getSenderInfo();
+        if ( ! empty($params['sender_info']) && is_array($params['sender_info']) ) {
+            $sender_info = array_merge($sender_info, $params['sender_info']);
+        }
+
         $params = [
             'auth_key'        => Configuration::get('CLEANTALKANTISPAM_API_KEY'),
             'agent'           => $this->engine,
             'sender_ip'       => Helper::ipGet('real', false),
             'x_forwarded_for' => Helper::ipGet('x_forwarded_for', false),
             'x_real_ip'       => Helper::ipGet('x_real_ip', false),
+            'sender_info'     => $sender_info,
             'sender_email'    => isset($data['email']) ? $data['email'] : '',
             'sender_nickname' => $sender_nickname,
             'message'         => isset($data['message']) ? $data['message'] : '',
             'post_info'       => $post_info,
-            'event_token'     => isset($data['ct_bot_detector_event_token']) ? $data['ct_bot_detector_event_token'] : ''
+            'event_token'     => isset($data['ct_bot_detector_event_token']) ? $data['ct_bot_detector_event_token'] : '',
         ];
 
         $ct_request = new CleantalkRequest($params);
@@ -314,5 +321,12 @@ class CleantalkAntispam extends Module
             $ct_die_page = str_replace($place_holder, $replace, $ct_die_page);
         }
         die($ct_die_page);
+    }
+
+    private function getSenderInfo()
+    {
+        return [
+            'REFFERRER' => Server::get('HTTP_REFERER'),
+        ];
     }
 }
