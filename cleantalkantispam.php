@@ -28,7 +28,7 @@ class CleantalkAntispam extends Module
         $this->need_instance = 0;
         $this->ps_versions_compliancy = [
             'min' => '1.7.0.0',
-            'max' => '8.99.99',
+            'max' => '9.0.3',
         ];
         $this->bootstrap = true;
 
@@ -38,6 +38,14 @@ class CleantalkAntispam extends Module
         $this->description = $this->l('No CAPTCHA, no questions, no animal counting, no puzzles, no math and no spam bots. Universal AntiSpam plugin.');
 
         $this->confirmUninstall = $this->l('Are you sure you want to uninstall?');
+
+        // Check if the registration form is submitted
+        if (isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD'] === 'POST'
+            && isset($_POST['submitCreate']) && $_POST['submitCreate'] === '1'
+            && isset($_POST['email']) && $_POST['email'] !== ''
+        ) {
+            $this->checkRegistrationSpam();
+        }
     }
 
     public function install()
@@ -45,6 +53,7 @@ class CleantalkAntispam extends Module
         return parent::install()
             && Configuration::updateValue('CLEANTALKANTISPAM_ENABLE_BOTDETECTOR', 1)
             && $this->registerHook('actionSubmitAccountBefore')
+            && $this->registerHook('actionBeforeSubmitAccount')
             && $this->registerHook('actionFrontControllerInitAfter')
             && $this->registerHook('actionValidateOrder')
             && $this->registerHook('actionNewsletterRegistrationBefore')
@@ -61,7 +70,7 @@ class CleantalkAntispam extends Module
     public function hookDisplayHeader()
     {
         if (Configuration::get('CLEANTALKANTISPAM_ENABLE_BOTDETECTOR')) {
-            return '<script src="https://moderate.cleantalk.org/ct-bot-detector-wrapper.js"></script>';
+            return '<script src="https://fd.cleantalk.org/ct-bot-detector-wrapper.js"></script>';
         }
 
         return '';
@@ -166,12 +175,16 @@ class CleantalkAntispam extends Module
 
     public function hookActionSubmitAccountBefore($params)
     {
-        $data = Tools::getAllValues();
-        $cleantalk_check = $this->checkSpam($data, true);
-        if ( $cleantalk_check['allow'] == 0 ) {
-            $this->doBlockPage($cleantalk_check['comment']);
-        }
-        return true;
+        return $this->checkRegistrationSpam();
+    }
+
+    /**
+     * PrestaShop AuthController calls this hook (actionBeforeSubmitAccount)
+     * for registration form submissions (submitAccount / submitGuestAccount).
+     */
+    public function hookActionBeforeSubmitAccount($params)
+    {
+        return $this->checkRegistrationSpam();
     }
 
     public function hookActionFrontControllerInitAfter(&$params)
@@ -317,8 +330,8 @@ class CleantalkAntispam extends Module
         }
 
         $sender_info = $this->getSenderInfo();
-        if ( ! empty($params['sender_info']) && is_array($params['sender_info']) ) {
-            $sender_info = array_merge($sender_info, $params['sender_info']);
+        if ( ! empty($data['sender_info']) && is_array($data['sender_info']) ) {
+            $sender_info = array_merge($sender_info, $data['sender_info']);
         }
 
         $params = [
@@ -344,6 +357,15 @@ class CleantalkAntispam extends Module
         $result = json_decode(json_encode($result), true);
 
         return $result;
+    }
+
+    private function checkRegistrationSpam()
+    {
+        $data = Tools::getAllValues();
+        $cleantalk_check = $this->checkSpam($data, true);
+        if ($cleantalk_check['allow'] == 0) {
+            $this->doBlockPage($cleantalk_check['comment']);
+        }
     }
 
     private function doBlockPage($message)
