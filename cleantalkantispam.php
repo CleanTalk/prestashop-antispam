@@ -204,6 +204,19 @@ class CleantalkAntispam extends Module
             }
         }
 
+        // Creative Elements contact form integration (AJAX)
+        if ( Tools::isSubmit('submitMessage') && isset($params['controller']) && $this->isCreativeElementsAjaxController($params['controller']) ) {
+            $data = [];
+            $data['email'] = isset($form_data['from']) ? $form_data['from'] : '';
+            $data['message'] = isset($form_data['message']) ? $form_data['message'] : '';
+            $data['ct_bot_detector_event_token'] = Tools::getValue('ct_bot_detector_event_token', '');
+            $data['post_info']['comment_type'] = 'contact_form_creative_elements';
+            $cleantalk_check = $this->checkSpam($data);
+            if ( $cleantalk_check['allow'] == 0 ) {
+                $this->doBlockAjax($cleantalk_check['comment']);
+            }
+        }
+
         // Registration during checkout
         if (isset($form_data['id_gender'], $form_data['firstname'], $form_data['lastname']) &&
             $params['controller'] instanceof \OrderController
@@ -212,6 +225,41 @@ class CleantalkAntispam extends Module
         }
 
         return true;
+    }
+
+    /**
+     * Check if the controller is Creative Elements AJAX controller.
+     *
+     * @param mixed $controller
+     * @return bool
+     */
+    private function isCreativeElementsAjaxController($controller)
+    {
+        if ( ! is_object($controller) ) {
+            return false;
+        }
+
+        $controller_class = get_class($controller);
+
+        return stripos($controller_class, 'creativeelements') !== false
+            && stripos($controller_class, 'ajax') !== false;
+    }
+
+    /**
+     * Block AJAX request with JSON error response.
+     * Format compatible with Creative Elements contact form.
+     *
+     * @param string $message
+     * @return void
+     */
+    private function doBlockAjax($message)
+    {
+        header('Content-Type: application/json');
+        header('Cache-Control: no-store, no-cache, must-revalidate, post-check=0, pre-check=0');
+        die(json_encode([
+            'success' => '',
+            'errors' => [$message],
+        ]));
     }
 
     public function hookActionValidateOrder($params)
