@@ -292,7 +292,7 @@ class CleantalkAntispam extends Module
         $error_html = '<div id="thankyou-page">' .
                       '<div class="alert alert-danger">' .
                       '<button type="button" class="close" data-dismiss="alert">&times;</button>' .
-                      htmlspecialchars($message) .
+                      htmlspecialchars($message, ENT_QUOTES, 'UTF-8') .
                       '</div>' .
                       '</div>';
         
@@ -355,10 +355,19 @@ class CleantalkAntispam extends Module
         }
     }
 
+    /**
+     * @param array $data
+     * @param bool $is_check_register
+     * @return array
+     */
     private function checkSpam($data, $is_check_register = false)
     {
+        // Return default "allowed" result if API key is not configured
         if ( ! Configuration::get('CLEANTALKANTISPAM_API_KEY') ) {
-            return true;
+            return [
+                'allow' => 1,
+                'comment' => '',
+            ];
         }
 
         $sender_nickname = $data['nickname'] ?? '';
@@ -456,8 +465,6 @@ class CleantalkAntispam extends Module
 
         // Common field name patterns for email
         $email_fields = ['email', 'mail', 'e-mail', 'from'];
-        // Common field name patterns for name
-        $name_fields = ['first_name', 'firstname', 'name', 'last_name', 'lastname'];
         // Common field name patterns for message
         $message_fields = ['message', 'comment', 'comments', 'text', 'body', 'content'];
 
