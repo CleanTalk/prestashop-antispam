@@ -192,6 +192,21 @@ class CleantalkAntispam extends Module
         // Getting data from the request
         $form_data = Tools::getAllValues();
 
+        // Form Builder Pro (gformbuilderpro) integration
+        if (isset($form_data['idform']) && isset($form_data['gSubmitForm']) && $form_data['gSubmitForm'] == '1') {
+            $data = $this->extractFormBuilderData($form_data);
+            $data['ct_bot_detector_event_token'] = Tools::getValue('ct_bot_detector_event_token', '');
+            $data['post_info']['comment_type'] = 'contact_form_gformbuilderpro';
+            $cleantalk_check = $this->checkSpam($data);
+            if ($cleantalk_check['allow'] == 0) {
+                if (!empty($form_data['usingajax']) && $form_data['usingajax'] == '1') {
+                    $this->doBlockFormBuilderAjax($cleantalk_check['comment']);
+                } else {
+                    $this->doBlockPage($cleantalk_check['comment']);
+                }
+            }
+        }
+
         // Contact Form integration
         if ( Tools::isSubmit('submitMessage') && isset($params['controller']) && $params['controller'] instanceof \ContactController ) {
             $data['email'] = isset($form_data['from']) ? $form_data['from'] : '';
@@ -259,6 +274,34 @@ class CleantalkAntispam extends Module
         die(json_encode([
             'success' => '',
             'errors' => [$message],
+        ]));
+    }
+
+    /**
+     * Block Form Builder Pro AJAX request with JSON error response.
+     * Format compatible with gformbuilderpro module.
+     *
+     * @param string $message
+     * @return void
+     */
+    private function doBlockFormBuilderAjax($message)
+    {
+        header('Content-Type: application/json');
+        header('Cache-Control: no-store, no-cache, must-revalidate, post-check=0, pre-check=0');
+        
+        $error_html = '<div id="thankyou-page">' .
+                      '<div class="alert alert-danger">' .
+                      '<button type="button" class="close" data-dismiss="alert">&times;</button>' .
+                      htmlspecialchars($message) .
+                      '</div>' .
+                      '</div>';
+        
+        die(json_encode([
+            'errors' => '1',
+            'thankyou' => $error_html,
+            'autoredirect' => false,
+            'timedelay' => 0,
+            'redirect_link' => '',
         ]));
     }
 
@@ -398,5 +441,90 @@ class CleantalkAntispam extends Module
         return [
             'REFFERRER' => Server::get('HTTP_REFERER'),
         ];
+    }
+
+    /**
+     * Extract email, name and message from Form Builder Pro form data.
+     * Searches through all fields for typical field names.
+     *
+     * @param array $form_data
+     * @return array
+     */
+    private function extractFormBuilderData($form_data)
+    {
+        $data = [];
+
+        // Common field name patterns for email
+        $email_fields = ['email', 'mail', 'e-mail', 'from'];
+        // Common field name patterns for name
+        $name_fields = ['first_name', 'firstname', 'name', 'last_name', 'lastname'];
+        // Common field name patterns for message
+        $message_fields = ['message', 'comment', 'comments', 'text', 'body', 'content'];
+
+        foreach ($form_data as $key => $value) {
+            if (!is_string($value)) {
+                continue;
+            }
+
+            $key_lower = strtolower($key);
+
+            if (empty($data['email'])) {
+                foreach ($email_fields as $pattern) {
+                    if (strpos($key_lower, $pattern) !== false && filter_var($value, FILTER_VALIDATE_EMAIL)) {
+                        $data['email'] = $value;
+                        break;
+                    }
+                }
+            }
+
+            if (empty($data['firstname'])) {
+                if (strpos($key_lower, 'first') !== false || $key_lower === 'name') {
+                    $data['firstname'] = $value;
+                }
+            }
+
+            if (empty($data['lastname'])) {
+                if (strpos($key_lower, 'last') !== false) {
+                    $data['lastname'] = $value;
+                }
+            }
+
+            if (empty($data['message'])) {
+                foreach ($message_fields as $pattern) {
+                    if (strpos($key_lower, $pattern) !== false) {
+                        $data['message'] = $value;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // If no email found by field name, try to find any valid email in form data
+        if (empty($data['email'])) {
+            foreach ($form_data as $key => $value) {
+                if (is_string($value) && filter_var($value, FILTER_VALIDATE_EMAIL)) {
+                    $data['email'] = $value;
+                    break;
+                }
+            }
+        }
+
+        // Build message from all text fields if no specific message field found
+        if (empty($data['message'])) {
+            $message_parts = [];
+            $skip_fields = ['idform', 'id_lang', 'id_shop', 'Conditions', 'ConditionsHide', 
+                           'gSubmitForm', 'usingajax', 'ct_bot_detector_event_token'];
+            foreach ($form_data as $key => $value) {
+                if (is_string($value) && !empty($value) && !in_array($key, $skip_fields) 
+                    && strpos($key, 'input_') === 0) {
+                    $message_parts[] = $value;
+                }
+            }
+            if (!empty($message_parts)) {
+                $data['message'] = implode(' ', $message_parts);
+            }
+        }
+
+        return $data;
     }
 }
