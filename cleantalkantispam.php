@@ -14,7 +14,7 @@ require_once __DIR__ . '/lib/autoload.php';
 
 class CleantalkAntispam extends Module
 {
-    private const PLUGIN_VERSION = '2.0.0';
+    private const PLUGIN_VERSION = '2.1.0';
 
     private $engine;
 
@@ -288,14 +288,14 @@ class CleantalkAntispam extends Module
     {
         header('Content-Type: application/json');
         header('Cache-Control: no-store, no-cache, must-revalidate, post-check=0, pre-check=0');
-        
+
         $error_html = '<div id="thankyou-page">' .
                       '<div class="alert alert-danger">' .
                       '<button type="button" class="close" data-dismiss="alert">&times;</button>' .
                       htmlspecialchars($message, ENT_QUOTES, 'UTF-8') .
                       '</div>' .
                       '</div>';
-        
+
         die(json_encode([
             'errors' => '1',
             'thankyou' => $error_html,
@@ -519,10 +519,10 @@ class CleantalkAntispam extends Module
         // Build message from all text fields if no specific message field found
         if (empty($data['message'])) {
             $message_parts = [];
-            $skip_fields = ['idform', 'id_lang', 'id_shop', 'Conditions', 'ConditionsHide', 
+            $skip_fields = ['idform', 'id_lang', 'id_shop', 'Conditions', 'ConditionsHide',
                            'gSubmitForm', 'usingajax', 'ct_bot_detector_event_token'];
             foreach ($form_data as $key => $value) {
-                if (is_string($value) && !empty($value) && !in_array($key, $skip_fields) 
+                if (is_string($value) && !empty($value) && !in_array($key, $skip_fields)
                     && strpos($key, 'input_') === 0) {
                     $message_parts[] = $value;
                 }
