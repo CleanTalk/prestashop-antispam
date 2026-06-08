@@ -18,6 +18,12 @@ class CleantalkAntispam extends Module
 
     private $engine;
 
+    /**
+     * Flag to prevent several request per a runtime
+     * @var bool
+     */
+    private $registrationAlreadyProcessed = false;
+
     public function __construct()
     {
         $this->name = 'cleantalkantispam';
@@ -413,11 +419,15 @@ class CleantalkAntispam extends Module
 
     private function checkRegistrationSpam()
     {
+        if ( $this->registrationAlreadyProcessed ) {
+            return;
+        }
         $data = Tools::getAllValues();
         $cleantalk_check = $this->checkSpam($data, true);
         if ($cleantalk_check['allow'] == 0) {
             $this->doBlockPage($cleantalk_check['comment']);
         }
+        $this->registrationAlreadyProcessed = true;
     }
 
     private function doBlockPage($message)
