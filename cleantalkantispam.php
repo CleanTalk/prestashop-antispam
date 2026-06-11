@@ -404,6 +404,7 @@ class CleantalkAntispam extends Module
             'message'         => isset($data['message']) ? $data['message'] : '',
             'post_info'       => $post_info,
             'event_token'     => isset($data['ct_bot_detector_event_token']) ? $data['ct_bot_detector_event_token'] : '',
+            'event_token_enabled'=> (bool) Configuration::get('CLEANTALKANTISPAM_ENABLE_BOTDETECTOR'),
         ];
 
         $ct_request = new CleantalkRequest($params);
