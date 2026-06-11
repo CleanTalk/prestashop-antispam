@@ -14,9 +14,15 @@ require_once __DIR__ . '/lib/autoload.php';
 
 class CleantalkAntispam extends Module
 {
-    private const PLUGIN_VERSION = '2.0.0';
+    private const PLUGIN_VERSION = '2.1.0';
 
     private $engine;
+
+    /**
+     * Flag to prevent several request per a runtime
+     * @var bool
+     */
+    private $registrationAlreadyProcessed = false;
 
     public function __construct()
     {
@@ -28,7 +34,7 @@ class CleantalkAntispam extends Module
         $this->need_instance = 0;
         $this->ps_versions_compliancy = [
             'min' => '1.7.0.0',
-            'max' => '8.99.99',
+            'max' => '9.0.3',
         ];
         $this->bootstrap = true;
 
@@ -38,6 +44,14 @@ class CleantalkAntispam extends Module
         $this->description = $this->l('No CAPTCHA, no questions, no animal counting, no puzzles, no math and no spam bots. Universal AntiSpam plugin.');
 
         $this->confirmUninstall = $this->l('Are you sure you want to uninstall?');
+
+        // Check if the registration form is submitted
+        if (isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD'] === 'POST'
+            && isset($_POST['submitCreate']) && $_POST['submitCreate'] === '1'
+            && isset($_POST['email']) && $_POST['email'] !== ''
+        ) {
+            $this->checkRegistrationSpam();
+        }
     }
 
     public function install()
@@ -45,6 +59,7 @@ class CleantalkAntispam extends Module
         return parent::install()
             && Configuration::updateValue('CLEANTALKANTISPAM_ENABLE_BOTDETECTOR', 1)
             && $this->registerHook('actionSubmitAccountBefore')
+            && $this->registerHook('actionBeforeSubmitAccount')
             && $this->registerHook('actionFrontControllerInitAfter')
             && $this->registerHook('actionValidateOrder')
             && $this->registerHook('actionNewsletterRegistrationBefore')
@@ -61,7 +76,7 @@ class CleantalkAntispam extends Module
     public function hookDisplayHeader()
     {
         if (Configuration::get('CLEANTALKANTISPAM_ENABLE_BOTDETECTOR')) {
-            return '<script src="https://moderate.cleantalk.org/ct-bot-detector-wrapper.js"></script>';
+            return '<script src="https://fd.cleantalk.org/ct-bot-detector-wrapper.js"></script>';
         }
 
         return '';
@@ -166,18 +181,37 @@ class CleantalkAntispam extends Module
 
     public function hookActionSubmitAccountBefore($params)
     {
-        $data = Tools::getAllValues();
-        $cleantalk_check = $this->checkSpam($data, true);
-        if ( $cleantalk_check['allow'] == 0 ) {
-            $this->doBlockPage($cleantalk_check['comment']);
-        }
-        return true;
+        return $this->checkRegistrationSpam();
+    }
+
+    /**
+     * PrestaShop AuthController calls this hook (actionBeforeSubmitAccount)
+     * for registration form submissions (submitAccount / submitGuestAccount).
+     */
+    public function hookActionBeforeSubmitAccount($params)
+    {
+        return $this->checkRegistrationSpam();
     }
 
     public function hookActionFrontControllerInitAfter(&$params)
     {
         // Getting data from the request
         $form_data = Tools::getAllValues();
+
+        // Form Builder Pro (gformbuilderpro) integration
+        if (isset($form_data['idform']) && isset($form_data['gSubmitForm']) && $form_data['gSubmitForm'] == '1') {
+            $data = $this->extractFormBuilderData($form_data);
+            $data['ct_bot_detector_event_token'] = Tools::getValue('ct_bot_detector_event_token', '');
+            $data['post_info']['comment_type'] = 'contact_form_gformbuilderpro';
+            $cleantalk_check = $this->checkSpam($data);
+            if ($cleantalk_check['allow'] == 0) {
+                if (!empty($form_data['usingajax']) && $form_data['usingajax'] == '1') {
+                    $this->doBlockFormBuilderAjax($cleantalk_check['comment']);
+                } else {
+                    $this->doBlockPage($cleantalk_check['comment']);
+                }
+            }
+        }
 
         // Contact Form integration
         if ( Tools::isSubmit('submitMessage') && isset($params['controller']) && $params['controller'] instanceof \ContactController ) {
@@ -191,6 +225,19 @@ class CleantalkAntispam extends Module
             }
         }
 
+        // Creative Elements contact form integration (AJAX)
+        if ( Tools::isSubmit('submitMessage') && isset($params['controller']) && $this->isCreativeElementsAjaxController($params['controller']) ) {
+            $data = [];
+            $data['email'] = isset($form_data['from']) ? $form_data['from'] : '';
+            $data['message'] = isset($form_data['message']) ? $form_data['message'] : '';
+            $data['ct_bot_detector_event_token'] = Tools::getValue('ct_bot_detector_event_token', '');
+            $data['post_info']['comment_type'] = 'contact_form_creative_elements';
+            $cleantalk_check = $this->checkSpam($data);
+            if ( $cleantalk_check['allow'] == 0 ) {
+                $this->doBlockAjax($cleantalk_check['comment']);
+            }
+        }
+
         // Registration during checkout
         if (isset($form_data['id_gender'], $form_data['firstname'], $form_data['lastname']) &&
             $params['controller'] instanceof \OrderController
@@ -199,6 +246,69 @@ class CleantalkAntispam extends Module
         }
 
         return true;
+    }
+
+    /**
+     * Check if the controller is Creative Elements AJAX controller.
+     *
+     * @param mixed $controller
+     * @return bool
+     */
+    private function isCreativeElementsAjaxController($controller)
+    {
+        if ( ! is_object($controller) ) {
+            return false;
+        }
+
+        $controller_class = get_class($controller);
+
+        return stripos($controller_class, 'creativeelements') !== false
+            && stripos($controller_class, 'ajax') !== false;
+    }
+
+    /**
+     * Block AJAX request with JSON error response.
+     * Format compatible with Creative Elements contact form.
+     *
+     * @param string $message
+     * @return void
+     */
+    private function doBlockAjax($message)
+    {
+        header('Content-Type: application/json');
+        header('Cache-Control: no-store, no-cache, must-revalidate, post-check=0, pre-check=0');
+        die(json_encode([
+            'success' => '',
+            'errors' => [$message],
+        ]));
+    }
+
+    /**
+     * Block Form Builder Pro AJAX request with JSON error response.
+     * Format compatible with gformbuilderpro module.
+     *
+     * @param string $message
+     * @return void
+     */
+    private function doBlockFormBuilderAjax($message)
+    {
+        header('Content-Type: application/json');
+        header('Cache-Control: no-store, no-cache, must-revalidate, post-check=0, pre-check=0');
+
+        $error_html = '<div id="thankyou-page">' .
+                      '<div class="alert alert-danger">' .
+                      '<button type="button" class="close" data-dismiss="alert">&times;</button>' .
+                      htmlspecialchars($message, ENT_QUOTES, 'UTF-8') .
+                      '</div>' .
+                      '</div>';
+
+        die(json_encode([
+            'errors' => '1',
+            'thankyou' => $error_html,
+            'autoredirect' => false,
+            'timedelay' => 0,
+            'redirect_link' => '',
+        ]));
     }
 
     public function hookActionValidateOrder($params)
@@ -251,10 +361,19 @@ class CleantalkAntispam extends Module
         }
     }
 
+    /**
+     * @param array $data
+     * @param bool $is_check_register
+     * @return array
+     */
     private function checkSpam($data, $is_check_register = false)
     {
+        // Return default "allowed" result if API key is not configured
         if ( ! Configuration::get('CLEANTALKANTISPAM_API_KEY') ) {
-            return true;
+            return [
+                'allow' => 1,
+                'comment' => '',
+            ];
         }
 
         $sender_nickname = $data['nickname'] ?? '';
@@ -269,8 +388,8 @@ class CleantalkAntispam extends Module
         }
 
         $sender_info = $this->getSenderInfo();
-        if ( ! empty($params['sender_info']) && is_array($params['sender_info']) ) {
-            $sender_info = array_merge($sender_info, $params['sender_info']);
+        if ( ! empty($data['sender_info']) && is_array($data['sender_info']) ) {
+            $sender_info = array_merge($sender_info, $data['sender_info']);
         }
 
         $params = [
@@ -285,6 +404,7 @@ class CleantalkAntispam extends Module
             'message'         => isset($data['message']) ? $data['message'] : '',
             'post_info'       => $post_info,
             'event_token'     => isset($data['ct_bot_detector_event_token']) ? $data['ct_bot_detector_event_token'] : '',
+            'event_token_enabled'=> (bool) Configuration::get('CLEANTALKANTISPAM_ENABLE_BOTDETECTOR'),
         ];
 
         $ct_request = new CleantalkRequest($params);
@@ -296,6 +416,19 @@ class CleantalkAntispam extends Module
         $result = json_decode(json_encode($result), true);
 
         return $result;
+    }
+
+    private function checkRegistrationSpam()
+    {
+        if ( $this->registrationAlreadyProcessed ) {
+            return;
+        }
+        $data = Tools::getAllValues();
+        $cleantalk_check = $this->checkSpam($data, true);
+        if ($cleantalk_check['allow'] == 0) {
+            $this->doBlockPage($cleantalk_check['comment']);
+        }
+        $this->registrationAlreadyProcessed = true;
     }
 
     private function doBlockPage($message)
@@ -328,5 +461,88 @@ class CleantalkAntispam extends Module
         return [
             'REFFERRER' => Server::get('HTTP_REFERER'),
         ];
+    }
+
+    /**
+     * Extract email, name and message from Form Builder Pro form data.
+     * Searches through all fields for typical field names.
+     *
+     * @param array $form_data
+     * @return array
+     */
+    private function extractFormBuilderData($form_data)
+    {
+        $data = [];
+
+        // Common field name patterns for email
+        $email_fields = ['email', 'mail', 'e-mail', 'from'];
+        // Common field name patterns for message
+        $message_fields = ['message', 'comment', 'comments', 'text', 'body', 'content'];
+
+        foreach ($form_data as $key => $value) {
+            if (!is_string($value)) {
+                continue;
+            }
+
+            $key_lower = strtolower($key);
+
+            if (empty($data['email'])) {
+                foreach ($email_fields as $pattern) {
+                    if (strpos($key_lower, $pattern) !== false && filter_var($value, FILTER_VALIDATE_EMAIL)) {
+                        $data['email'] = $value;
+                        break;
+                    }
+                }
+            }
+
+            if (empty($data['firstname'])) {
+                if (strpos($key_lower, 'first') !== false || $key_lower === 'name') {
+                    $data['firstname'] = $value;
+                }
+            }
+
+            if (empty($data['lastname'])) {
+                if (strpos($key_lower, 'last') !== false) {
+                    $data['lastname'] = $value;
+                }
+            }
+
+            if (empty($data['message'])) {
+                foreach ($message_fields as $pattern) {
+                    if (strpos($key_lower, $pattern) !== false) {
+                        $data['message'] = $value;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // If no email found by field name, try to find any valid email in form data
+        if (empty($data['email'])) {
+            foreach ($form_data as $key => $value) {
+                if (is_string($value) && filter_var($value, FILTER_VALIDATE_EMAIL)) {
+                    $data['email'] = $value;
+                    break;
+                }
+            }
+        }
+
+        // Build message from all text fields if no specific message field found
+        if (empty($data['message'])) {
+            $message_parts = [];
+            $skip_fields = ['idform', 'id_lang', 'id_shop', 'Conditions', 'ConditionsHide',
+                           'gSubmitForm', 'usingajax', 'ct_bot_detector_event_token'];
+            foreach ($form_data as $key => $value) {
+                if (is_string($value) && !empty($value) && !in_array($key, $skip_fields)
+                    && strpos($key, 'input_') === 0) {
+                    $message_parts[] = $value;
+                }
+            }
+            if (!empty($message_parts)) {
+                $data['message'] = implode(' ', $message_parts);
+            }
+        }
+
+        return $data;
     }
 }
