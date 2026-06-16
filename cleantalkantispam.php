@@ -34,7 +34,7 @@ class CleantalkAntispam extends Module
         $this->need_instance = 0;
         $this->ps_versions_compliancy = [
             'min' => '1.7.0.0',
-            'max' => '9.0.3',
+            'max' => _PS_VERSION_,
         ];
         $this->bootstrap = true;
 
