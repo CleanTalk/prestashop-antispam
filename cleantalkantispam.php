@@ -421,7 +421,7 @@ class CleantalkAntispam extends Module
     private function checkRegistrationSpam()
     {
         if ( $this->registrationAlreadyProcessed ) {
-            return;
+            return true;
         }
         $data = Tools::getAllValues();
         $cleantalk_check = $this->checkSpam($data, true);
@@ -429,6 +429,7 @@ class CleantalkAntispam extends Module
             $this->doBlockPage($cleantalk_check['comment']);
         }
         $this->registrationAlreadyProcessed = true;
+        return true;
     }
 
     private function doBlockPage($message)
