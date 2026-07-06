@@ -76,7 +76,7 @@ class CleantalkAntispam extends Module
     public function hookDisplayHeader()
     {
         if (Configuration::get('CLEANTALKANTISPAM_ENABLE_BOTDETECTOR')) {
-            return '<script src="https://fd.cleantalk.org/ct-bot-detector-wrapper.js"></script>';
+            return '<script src="https://fd.cleantalk.org/ct-bot-detector-wrapper.js" async="async"></script>';
         }
 
         return '';
