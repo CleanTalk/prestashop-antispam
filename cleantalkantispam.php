@@ -68,13 +68,15 @@ class CleantalkAntispam extends Module
         $this->confirmUninstall = $this->l('Are you sure you want to uninstall?');
 
         if ($this->id && !Configuration::get('CLEANTALKANTISPAM_ORDER_HOOKS_V2')) {
-            $this->registerHook('actionDispatcherBefore');
-            $this->registerHook('actionObjectOrderAddBefore');
-            $this->unregisterHook('actionValidateOrder');
-            Configuration::updateValue('CLEANTALKANTISPAM_ORDER_HOOKS_V2', 1);
-            Db::getInstance()->update('module', [
-                'version' => pSQL(self::PLUGIN_VERSION),
-            ], 'id_module = ' . (int) $this->id);
+            $hooksReady = $this->registerHook('actionDispatcherBefore')
+                && $this->registerHook('actionObjectOrderAddBefore')
+                && $this->unregisterHook('actionValidateOrder');
+            if ($hooksReady) {
+                Configuration::updateValue('CLEANTALKANTISPAM_ORDER_HOOKS_V2', 1);
+                Db::getInstance()->update('module', [
+                    'version' => pSQL(self::PLUGIN_VERSION),
+                ], 'id_module = ' . (int) $this->id);
+            }
         }
 
         // Check if the registration form is submitted
@@ -355,14 +357,15 @@ class CleantalkAntispam extends Module
         if ($this->creatingBlockedOrder || $this->orderSpamChecked || !$this->isOffsitePaymentRequest($params)) {
             return;
         }
-        if ($this->isPaymentGatewayCallback()) {
+        // A signed return or a server notification is not a new checkout. The order is checked on insert.
+        if ($this->isPaymentGatewayCallback() || $this->hasPaymentGatewayPayload()) {
             return;
         }
 
         $this->loadCheckoutContext();
         $customer = $this->getCheckoutCustomer();
         $cart = $this->getCheckoutCart();
-        if (!$customer || !$cart || !$this->isCartReadyForOrder($cart)) {
+        if (!$customer || !$cart || !$this->isCartReadyForOrder($cart) || $cart->OrderExists()) {
             return;
         }
 
@@ -389,6 +392,10 @@ class CleantalkAntispam extends Module
         }
 
         $order = $params['object'];
+        if (!$this->shouldCheckOrderCreation($order)) {
+            return;
+        }
+
         $customer = new Customer((int) $order->id_customer);
         if (!Validate::isLoadedObject($customer)) {
             return;
@@ -447,20 +454,13 @@ class CleantalkAntispam extends Module
     }
 
     /**
-     * Server-to-server payment notifications must not receive the HTML block page.
-     * A browser return still has the customer session and asks for HTML.
+     * Signed payment result (Redsys, Amazon Pay, PayPal and similar).
+     * Present on both the server notification and the customer's browser return.
      *
      * @return bool
      */
-    private function isPaymentGatewayCallback()
+    private function hasPaymentGatewayPayload()
     {
-        $context = Context::getContext();
-        $hasCustomer = isset($context->cookie->id_customer) && (int) $context->cookie->id_customer > 0;
-        $accept = isset($_SERVER['HTTP_ACCEPT']) ? (string) $_SERVER['HTTP_ACCEPT'] : '';
-        if ($hasCustomer && strpos($accept, 'text/html') !== false) {
-            return false;
-        }
-
         $gatewayKeys = [
             'Ds_Signature',
             'Ds_MerchantParameters',
@@ -475,9 +475,100 @@ class CleantalkAntispam extends Module
             }
         }
 
+        return false;
+    }
+
+    /**
+     * Server-to-server payment notifications must not receive the HTML block page.
+     * A browser that still has the customer session and asks for HTML is not a callback.
+     *
+     * @return bool
+     */
+    private function isPaymentGatewayCallback()
+    {
+        if ($this->isCustomerBrowserRequest()) {
+            return false;
+        }
+        if ($this->hasPaymentGatewayPayload()) {
+            return true;
+        }
+
+        $context = Context::getContext();
+        $hasCustomer = isset($context->cookie->id_customer) && (int) $context->cookie->id_customer > 0;
         $method = isset($_SERVER['REQUEST_METHOD']) ? (string) $_SERVER['REQUEST_METHOD'] : '';
 
         return $method === 'POST' && !$hasCustomer;
+    }
+
+    /**
+     * @return bool
+     */
+    private function isCustomerBrowserRequest()
+    {
+        $context = Context::getContext();
+        $hasCustomer = isset($context->cookie->id_customer) && (int) $context->cookie->id_customer > 0;
+        $accept = isset($_SERVER['HTTP_ACCEPT']) ? (string) $_SERVER['HTTP_ACCEPT'] : '';
+
+        return $hasCustomer && strpos($accept, 'text/html') !== false;
+    }
+
+    /**
+     * Back office, webservice and CLI create orders outside checkout.
+     *
+     * @return bool
+     */
+    private function isNonCheckoutContext()
+    {
+        if (PHP_SAPI === 'cli' || defined('_PS_ADMIN_DIR_')) {
+            return true;
+        }
+
+        $context = Context::getContext();
+        if (isset($context->employee) && Validate::isLoadedObject($context->employee)) {
+            return true;
+        }
+        if (isset($context->controller) && $context->controller instanceof AdminController) {
+            return true;
+        }
+
+        $script = isset($_SERVER['SCRIPT_NAME']) ? (string) $_SERVER['SCRIPT_NAME'] : '';
+
+        return $script !== '' && strpos($script, '/webservice/') !== false;
+    }
+
+    /**
+     * Check the insert only when a payment module is placing the order, or a gateway is notifying the shop.
+     *
+     * @param Order $order
+     * @return bool
+     */
+    private function shouldCheckOrderCreation(Order $order)
+    {
+        if ($this->isNonCheckoutContext()) {
+            return false;
+        }
+
+        $moduleName = (string) $order->module;
+        if ($moduleName !== '' && $this->isInstalledPaymentModule($moduleName)) {
+            return true;
+        }
+
+        return $this->isPaymentGatewayCallback() || $this->hasPaymentGatewayPayload();
+    }
+
+    /**
+     * @param string $moduleName
+     * @return bool
+     */
+    private function isInstalledPaymentModule($moduleName)
+    {
+        if ($moduleName === '' || !Validate::isModuleName($moduleName)) {
+            return false;
+        }
+
+        $module = Module::getInstanceByName($moduleName);
+
+        return $module instanceof PaymentModule && $module->active;
     }
 
     private function loadCheckoutContext()
@@ -740,18 +831,31 @@ class CleantalkAntispam extends Module
     }
 
     /**
-     * @return PaymentModule|null
+     * Core validateOrder() has to run on a PaymentModule. This instance is the anti-spam module
+     * itself, so a shop that only has Amazon Pay or Redsys still gets a cancelled order.
+     *
+     * @return PaymentModule
      */
     private function getOrderCreatorModule()
     {
-        foreach (self::ONSITE_PAYMENT_MODULES as $name) {
-            $module = Module::getInstanceByName($name);
-            if ($module instanceof PaymentModule && $module->active) {
-                return $module;
-            }
+        return new CleantalkAntispamPayment();
+    }
+
+    /**
+     * A captured payment must stay captured. logable states and a recorded payment count as paid.
+     *
+     * @param Order $order
+     * @return bool
+     */
+    private function isOrderAlreadyPaid(Order $order)
+    {
+        if ((float) $order->total_paid_real > 0) {
+            return true;
         }
 
-        return null;
+        $state = new OrderState((int) $order->current_state);
+
+        return Validate::isLoadedObject($state) && (int) $state->logable === 1;
     }
 
     /**
@@ -807,7 +911,7 @@ class CleantalkAntispam extends Module
             'SELECT `id_order` FROM `' . _DB_PREFIX_ . 'orders` WHERE `id_cart` = ' . (int) $cart->id
         );
         $order = new Order($idOrder);
-        if (!Validate::isLoadedObject($order)) {
+        if (!Validate::isLoadedObject($order) || $this->isOrderAlreadyPaid($order)) {
             return;
         }
 
@@ -1083,5 +1187,18 @@ class CleantalkAntispam extends Module
         }
 
         return $data;
+    }
+}
+
+/**
+ * PaymentModule used only to store an order that CleanTalk has rejected.
+ */
+class CleantalkAntispamPayment extends PaymentModule
+{
+    public function __construct()
+    {
+        $this->name = 'cleantalkantispam';
+        parent::__construct();
+        $this->active = true;
     }
 }
