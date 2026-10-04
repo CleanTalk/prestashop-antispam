@@ -14,7 +14,17 @@ require_once __DIR__ . '/lib/autoload.php';
 
 class CleantalkAntispam extends Module
 {
-    private const PLUGIN_VERSION = '2.1.0';
+    private const PLUGIN_VERSION = '2.1.1';
+
+    /**
+     * Payment modules that create the order on the shop, without leaving the site.
+     * Off-site modules (Amazon Pay, Redsys and similar) are checked earlier.
+     */
+    private const ONSITE_PAYMENT_MODULES = [
+        'ps_checkpayment',
+        'ps_wirepayment',
+        'ps_cashondelivery',
+    ];
 
     private $engine;
 
@@ -23,6 +33,18 @@ class CleantalkAntispam extends Module
      * @var bool
      */
     private $registrationAlreadyProcessed = false;
+
+    /**
+     * Order spam decision already made during this request.
+     * @var bool
+     */
+    private $orderSpamChecked = false;
+
+    /**
+     * Guard so the cancelled order we create does not re-enter the spam check.
+     * @var bool
+     */
+    private $creatingBlockedOrder = false;
 
     public function __construct()
     {
@@ -34,7 +56,7 @@ class CleantalkAntispam extends Module
         $this->need_instance = 0;
         $this->ps_versions_compliancy = [
             'min' => '1.7.0.0',
-            'max' => '9.0.3',
+            'max' => '9.99.99',
         ];
         $this->bootstrap = true;
 
@@ -44,6 +66,18 @@ class CleantalkAntispam extends Module
         $this->description = $this->l('No CAPTCHA, no questions, no animal counting, no puzzles, no math and no spam bots. Universal AntiSpam plugin.');
 
         $this->confirmUninstall = $this->l('Are you sure you want to uninstall?');
+
+        if ($this->id && !Configuration::get('CLEANTALKANTISPAM_ORDER_HOOKS_V2')) {
+            $hooksReady = $this->registerHook('actionDispatcherBefore')
+                && $this->registerHook('actionObjectOrderAddBefore')
+                && $this->unregisterHook('actionValidateOrder');
+            if ($hooksReady) {
+                Configuration::updateValue('CLEANTALKANTISPAM_ORDER_HOOKS_V2', 1);
+                Db::getInstance()->update('module', [
+                    'version' => pSQL(self::PLUGIN_VERSION),
+                ], 'id_module = ' . (int) $this->id);
+            }
+        }
 
         // Check if the registration form is submitted
         if (isset($_SERVER['REQUEST_METHOD']) && $_SERVER['REQUEST_METHOD'] === 'POST'
@@ -61,8 +95,10 @@ class CleantalkAntispam extends Module
             && $this->registerHook('actionSubmitAccountBefore')
             && $this->registerHook('actionBeforeSubmitAccount')
             && $this->registerHook('actionFrontControllerInitAfter')
-            && $this->registerHook('actionValidateOrder')
+            && $this->registerHook('actionDispatcherBefore')
+            && $this->registerHook('actionObjectOrderAddBefore')
             && $this->registerHook('actionNewsletterRegistrationBefore')
+            && Configuration::updateValue('CLEANTALKANTISPAM_ORDER_HOOKS_V2', 1)
             && $this->registerHook('displayHeader');
     }
 
@@ -70,7 +106,8 @@ class CleantalkAntispam extends Module
     {
         return parent::uninstall()
             && Configuration::deleteByName('CLEANTALKANTISPAM_ENABLE_BOTDETECTOR')
-            && Configuration::deleteByName('CLEANTALKANTISPAM_API_KEY');
+            && Configuration::deleteByName('CLEANTALKANTISPAM_API_KEY')
+            && Configuration::deleteByName('CLEANTALKANTISPAM_ORDER_HOOKS_V2');
     }
 
     public function hookDisplayHeader()
@@ -311,27 +348,632 @@ class CleantalkAntispam extends Module
         ]));
     }
 
-    public function hookActionValidateOrder($params)
+    /**
+     * Off-site payments (Amazon Pay, Redsys): the customer is about to leave the shop.
+     * The hook runs before the controller, before the database write and before the redirect.
+     */
+    public function hookActionDispatcherBefore($params)
     {
-        $order = $params['order'];
-        $customer = $params['customer'];
+        if ($this->creatingBlockedOrder || $this->orderSpamChecked || !$this->isOffsitePaymentRequest($params)) {
+            return;
+        }
+        // A signed return or a server notification is not a new checkout. The order is checked on insert.
+        if ($this->isPaymentGatewayCallback() || $this->hasPaymentGatewayPayload()) {
+            return;
+        }
 
-        // There is the NEW order
-        if ( is_null($order->getCurrentOrderState()) ) {
-            $data['email'] = $customer->email;
-            $data['firstname'] = $customer->firstname;
-            $data['lastname'] = $customer->lastname;
-            $data['message'] = ! is_null($customer->note) ? $customer->note : '';
-            $data['ct_bot_detector_event_token'] = Tools::getValue('ct_bot_detector_event_token', '');
-            $data['post_info']['comment_type'] = 'order';
-            $cleantalk_check = $this->checkSpam($data);
-            if ( $cleantalk_check['allow'] == 0 ) {
-                $history = new OrderHistory();
-                $history->id_order = (int) $order->id;
-                $history->changeIdOrderState(Configuration::get('PS_OS_CANCELED'), $order);
-                $this->doBlockPage($cleantalk_check['comment']);
+        $this->loadCheckoutContext();
+        $customer = $this->getCheckoutCustomer();
+        $cart = $this->getCheckoutCart();
+        if (!$customer || !$cart || !$this->isCartReadyForOrder($cart) || $cart->OrderExists()) {
+            return;
+        }
+
+        $decision = $this->evaluateOrderSpam($customer);
+        $this->orderSpamChecked = true;
+        if ($decision === null) {
+            return;
+        }
+
+        $this->blockOrder($customer, $cart, $decision['comment'], (string) Tools::getValue('module'));
+    }
+
+    /**
+     * On-site checkout: last point before the order row is inserted.
+     * Also covers payment callbacks that create the order after the customer has already left the shop.
+     */
+    public function hookActionObjectOrderAddBefore($params)
+    {
+        if ($this->creatingBlockedOrder || $this->orderSpamChecked) {
+            return;
+        }
+        if (empty($params['object']) || !($params['object'] instanceof Order)) {
+            return;
+        }
+
+        $order = $params['object'];
+        if (!$this->shouldCheckOrderCreation($order)) {
+            return;
+        }
+
+        $customer = new Customer((int) $order->id_customer);
+        if (!Validate::isLoadedObject($customer)) {
+            return;
+        }
+
+        $decision = $this->evaluateOrderSpam($customer);
+        $this->orderSpamChecked = true;
+        if ($decision === null) {
+            return;
+        }
+
+        $cart = new Cart((int) $order->id_cart);
+        $this->blockOrder(
+            $customer,
+            $cart,
+            $decision['comment'],
+            (string) $order->module,
+            (string) $order->payment
+        );
+    }
+
+    /**
+     * @param array $params
+     * @return bool
+     */
+    private function isOffsitePaymentRequest($params)
+    {
+        if (!is_array($params) || !isset($params['controller_type'])) {
+            return false;
+        }
+        if ((int) $params['controller_type'] !== Dispatcher::FC_MODULE || Tools::getValue('fc') !== 'module') {
+            return false;
+        }
+
+        $moduleName = (string) Tools::getValue('module');
+        if ($moduleName === '' || in_array($moduleName, self::ONSITE_PAYMENT_MODULES, true)) {
+            return false;
+        }
+
+        return $this->isActivePaymentModule($moduleName);
+    }
+
+    /**
+     * @param string $moduleName
+     * @return bool
+     */
+    private function isActivePaymentModule($moduleName)
+    {
+        foreach (Module::getPaymentModules() as $module) {
+            if (isset($module['name']) && $module['name'] === $moduleName) {
+                return true;
             }
         }
+
+        return false;
+    }
+
+    /**
+     * Signed payment result (Redsys, Amazon Pay, PayPal and similar).
+     * Present on both the server notification and the customer's browser return.
+     *
+     * @return bool
+     */
+    private function hasPaymentGatewayPayload()
+    {
+        $gatewayKeys = [
+            'Ds_Signature',
+            'Ds_MerchantParameters',
+            'amazonCheckoutSessionId',
+            'amazon_Login_accessToken',
+            'txn_id',
+            'payment_status',
+        ];
+        foreach ($gatewayKeys as $key) {
+            if (Tools::getValue($key)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Server-to-server payment notifications must not receive the HTML block page.
+     * A browser that still has the customer session and asks for HTML is not a callback.
+     *
+     * @return bool
+     */
+    private function isPaymentGatewayCallback()
+    {
+        if ($this->isCustomerBrowserRequest()) {
+            return false;
+        }
+        if ($this->hasPaymentGatewayPayload()) {
+            return true;
+        }
+
+        $context = Context::getContext();
+        $hasCustomer = isset($context->cookie->id_customer) && (int) $context->cookie->id_customer > 0;
+        $method = isset($_SERVER['REQUEST_METHOD']) ? (string) $_SERVER['REQUEST_METHOD'] : '';
+
+        return $method === 'POST' && !$hasCustomer;
+    }
+
+    /**
+     * @return bool
+     */
+    private function isCustomerBrowserRequest()
+    {
+        $context = Context::getContext();
+        $hasCustomer = isset($context->cookie->id_customer) && (int) $context->cookie->id_customer > 0;
+        $accept = isset($_SERVER['HTTP_ACCEPT']) ? (string) $_SERVER['HTTP_ACCEPT'] : '';
+
+        return $hasCustomer && strpos($accept, 'text/html') !== false;
+    }
+
+    /**
+     * Back office, webservice and CLI create orders outside checkout.
+     *
+     * @return bool
+     */
+    private function isNonCheckoutContext()
+    {
+        if (PHP_SAPI === 'cli' || defined('_PS_ADMIN_DIR_')) {
+            return true;
+        }
+
+        $context = Context::getContext();
+        if (isset($context->employee) && Validate::isLoadedObject($context->employee)) {
+            return true;
+        }
+        if (isset($context->controller) && $context->controller instanceof AdminController) {
+            return true;
+        }
+
+        $script = isset($_SERVER['SCRIPT_NAME']) ? (string) $_SERVER['SCRIPT_NAME'] : '';
+
+        return $script !== '' && strpos($script, '/webservice/') !== false;
+    }
+
+    /**
+     * Check the insert only when a payment module is placing the order, or a gateway is notifying the shop.
+     *
+     * @param Order $order
+     * @return bool
+     */
+    private function shouldCheckOrderCreation(Order $order)
+    {
+        if ($this->isNonCheckoutContext()) {
+            return false;
+        }
+
+        $moduleName = (string) $order->module;
+        if ($moduleName !== '' && $this->isInstalledPaymentModule($moduleName)) {
+            return true;
+        }
+
+        return $this->isPaymentGatewayCallback() || $this->hasPaymentGatewayPayload();
+    }
+
+    /**
+     * @param string $moduleName
+     * @return bool
+     */
+    private function isInstalledPaymentModule($moduleName)
+    {
+        if ($moduleName === '' || !Validate::isModuleName($moduleName)) {
+            return false;
+        }
+
+        $module = Module::getInstanceByName($moduleName);
+
+        return $module instanceof PaymentModule && $module->active;
+    }
+
+    private function loadCheckoutContext()
+    {
+        $context = Context::getContext();
+        if (!isset($context->cookie)) {
+            return;
+        }
+
+        $idCart = (int) $context->cookie->id_cart;
+        $idCustomer = (int) $context->cookie->id_customer;
+        if ($idCart && (!isset($context->cart) || !(int) $context->cart->id)) {
+            $context->cart = new Cart($idCart);
+        }
+        if ($idCustomer && (!isset($context->customer) || !(int) $context->customer->id)) {
+            $context->customer = new Customer($idCustomer);
+        }
+    }
+
+    /**
+     * @return Customer|null
+     */
+    private function getCheckoutCustomer()
+    {
+        $context = Context::getContext();
+        if (isset($context->customer) && Validate::isLoadedObject($context->customer)) {
+            return $context->customer;
+        }
+        if (!isset($context->cookie) || !(int) $context->cookie->id_customer) {
+            return null;
+        }
+
+        $customer = new Customer((int) $context->cookie->id_customer);
+
+        return Validate::isLoadedObject($customer) ? $customer : null;
+    }
+
+    /**
+     * @return Cart|null
+     */
+    private function getCheckoutCart()
+    {
+        $context = Context::getContext();
+        if (isset($context->cart) && Validate::isLoadedObject($context->cart)) {
+            return $context->cart;
+        }
+        if (!isset($context->cookie) || !(int) $context->cookie->id_cart) {
+            return null;
+        }
+
+        $cart = new Cart((int) $context->cookie->id_cart);
+
+        return Validate::isLoadedObject($cart) ? $cart : null;
+    }
+
+    /**
+     * @param Cart $cart
+     * @return bool
+     */
+    private function isCartReadyForOrder($cart)
+    {
+        return Validate::isLoadedObject($cart)
+            && (int) $cart->id_customer
+            && (int) $cart->id_address_delivery
+            && (int) $cart->id_address_invoice
+            && (int) $cart->nbProducts() > 0;
+    }
+
+    /**
+     * @param Customer $customer
+     * @return array|null Spam payload when the order must be blocked
+     */
+    private function evaluateOrderSpam(Customer $customer)
+    {
+        $data = [
+            'email' => $customer->email,
+            'firstname' => $customer->firstname,
+            'lastname' => $customer->lastname,
+            'message' => !is_null($customer->note) ? $customer->note : '',
+            'ct_bot_detector_event_token' => Tools::getValue('ct_bot_detector_event_token', ''),
+            'post_info' => ['comment_type' => 'order'],
+        ];
+
+        if ($this->isPaymentGatewayCallback()) {
+            $ip = $this->getCustomerRecentIp((int) $customer->id);
+            if ($ip !== '') {
+                $data['sender_ip'] = $ip;
+            }
+        }
+
+        $result = $this->checkSpam($data);
+        if (!is_array($result) || !empty($result['errno']) || !isset($result['allow']) || $result['allow'] != 0) {
+            return null;
+        }
+
+        return $result;
+    }
+
+    /**
+     * @param int $idCustomer
+     * @return string
+     */
+    private function getCustomerRecentIp($idCustomer)
+    {
+        $ipLong = Db::getInstance()->getValue(
+            'SELECT c.ip_address
+            FROM `' . _DB_PREFIX_ . 'guest` g
+            INNER JOIN `' . _DB_PREFIX_ . 'connections` c ON c.id_guest = g.id_guest
+            WHERE g.id_customer = ' . (int) $idCustomer . '
+            ORDER BY c.date_add DESC'
+        );
+        if ($ipLong === false || $ipLong === null || $ipLong === '') {
+            return '';
+        }
+
+        $ip = long2ip((int) $ipLong);
+
+        return $ip && filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) ? $ip : '';
+    }
+
+    /**
+     * @param Customer $customer
+     * @param Cart $cart
+     * @param string $comment
+     * @param string $attemptedModule
+     * @param string $attemptedPayment
+     * @return void
+     */
+    private function blockOrder(Customer $customer, Cart $cart, $comment, $attemptedModule = '', $attemptedPayment = '')
+    {
+        $attempted = $attemptedPayment !== '' ? $attemptedPayment : $attemptedModule;
+        $message = $this->buildCancellationMessage($comment, $attempted);
+
+        try {
+            if (Validate::isLoadedObject($cart) && $cart->OrderExists()) {
+                $this->cancelExistingOrder($cart, $message);
+            } else {
+                $this->createCancelledOrder($customer, $cart, $message);
+            }
+        } catch (Throwable $exception) {
+            PrestaShopLogger::addLog(
+                'CleanTalk order block failed: ' . $exception->getMessage(),
+                3,
+                null,
+                'Customer',
+                (int) $customer->id,
+                true
+            );
+            $this->ensureCancelledRecord($cart, $message);
+        }
+
+        $this->stopBlockedOrderRequest($comment);
+    }
+
+    /**
+     * @param string $comment
+     * @param string $attemptedPayment
+     * @return string
+     */
+    private function buildCancellationMessage($comment, $attemptedPayment)
+    {
+        $comment = trim(strip_tags((string) $comment));
+        if (function_exists('mb_substr')) {
+            $comment = mb_substr($comment, 0, 800);
+        } else {
+            $comment = substr($comment, 0, 800);
+        }
+
+        $message = $this->l('Cancelled by CleanTalk Anti-Spam.');
+        if ($attemptedPayment !== '') {
+            $message .= ' ' . sprintf($this->l('Attempted payment: %s.'), $attemptedPayment);
+        }
+        if ($comment !== '') {
+            $message .= ' ' . $comment;
+        }
+        if (!Validate::isCleanHtml($message)) {
+            $message = $this->l('Cancelled by CleanTalk Anti-Spam.');
+        }
+
+        return $message;
+    }
+
+    /**
+     * @param Customer $customer
+     * @param Cart $cart
+     * @param string $message
+     * @return void
+     */
+    private function createCancelledOrder(Customer $customer, Cart $cart, $message)
+    {
+        $paymentModule = $this->getOrderCreatorModule();
+        if (!$paymentModule || !Validate::isLoadedObject($cart) || $cart->OrderExists()) {
+            return;
+        }
+
+        $this->prepareOrderContext($cart, $customer);
+        $this->ensureFrontContainer();
+
+        $this->creatingBlockedOrder = true;
+        $paymentModule->validateOrder(
+            (int) $cart->id,
+            (int) Configuration::get('PS_OS_CANCELED'),
+            (float) $cart->getOrderTotal(true, Cart::BOTH),
+            'CleanTalk Anti-Spam',
+            $message,
+            [],
+            (int) $cart->id_currency,
+            false,
+            $cart->secure_key ? $cart->secure_key : $customer->secure_key
+        );
+        $this->creatingBlockedOrder = false;
+    }
+
+    /**
+     * actionDispatcherBefore runs before the front controller boots the service container.
+     * Order creation uses that container for translations.
+     *
+     * @return void
+     */
+    private function ensureFrontContainer()
+    {
+        $context = Context::getContext();
+        if (isset($context->container) && $context->container) {
+            return;
+        }
+        if (!class_exists('\PrestaShop\PrestaShop\Adapter\ContainerBuilder')) {
+            return;
+        }
+
+        $context->container = \PrestaShop\PrestaShop\Adapter\ContainerBuilder::getContainer('front', _PS_MODE_DEV_);
+    }
+
+    /**
+     * Front controller has not prepared the shop context yet when the check runs
+     * from actionDispatcherBefore.
+     *
+     * @param Cart $cart
+     * @param Customer $customer
+     * @return void
+     */
+    private function prepareOrderContext(Cart $cart, Customer $customer)
+    {
+        $context = Context::getContext();
+        $context->cart = $cart;
+        $context->customer = $customer;
+        if ((int) $cart->id_shop) {
+            $context->shop = new Shop((int) $cart->id_shop);
+        }
+        if (!isset($context->language) || !Validate::isLoadedObject($context->language)) {
+            $context->language = new Language((int) ($cart->id_lang ?: Configuration::get('PS_LANG_DEFAULT')));
+        }
+        if (!isset($context->currency) || !Validate::isLoadedObject($context->currency)) {
+            $context->currency = new Currency((int) ($cart->id_currency ?: Configuration::get('PS_CURRENCY_DEFAULT')));
+        }
+        if (!isset($context->country) || !Validate::isLoadedObject($context->country)) {
+            $address = new Address((int) $cart->id_address_delivery);
+            $idCountry = (int) $address->id_country ?: (int) Configuration::get('PS_COUNTRY_DEFAULT');
+            $context->country = new Country($idCountry);
+        }
+    }
+
+    /**
+     * Core validateOrder() has to run on a PaymentModule. This instance is the anti-spam module
+     * itself, so a shop that only has Amazon Pay or Redsys still gets a cancelled order.
+     *
+     * @return PaymentModule
+     */
+    private function getOrderCreatorModule()
+    {
+        return new CleantalkAntispamPayment();
+    }
+
+    /**
+     * A captured payment must stay captured. logable states and a recorded payment count as paid.
+     *
+     * @param Order $order
+     * @return bool
+     */
+    private function isOrderAlreadyPaid(Order $order)
+    {
+        if ((float) $order->total_paid_real > 0) {
+            return true;
+        }
+
+        $state = new OrderState((int) $order->current_state);
+
+        return Validate::isLoadedObject($state) && (int) $state->logable === 1;
+    }
+
+    /**
+     * validateOrder can fail after the row is inserted, before the status history is stored.
+     * Keep the cancelled status and the history row in that case.
+     *
+     * @param Cart $cart
+     * @param string $message
+     * @return void
+     */
+    private function ensureCancelledRecord(Cart $cart, $message)
+    {
+        if (!Validate::isLoadedObject($cart) || !$cart->OrderExists()) {
+            return;
+        }
+
+        $idOrder = (int) Db::getInstance()->getValue(
+            'SELECT `id_order` FROM `' . _DB_PREFIX_ . 'orders` WHERE `id_cart` = ' . (int) $cart->id
+        );
+        $order = new Order($idOrder);
+        if (!Validate::isLoadedObject($order)) {
+            return;
+        }
+
+        $cancelledState = (int) Configuration::get('PS_OS_CANCELED');
+        if ((int) $order->current_state !== $cancelledState) {
+            $history = new OrderHistory();
+            $history->id_order = (int) $order->id;
+            $context = Context::getContext();
+            if (isset($context->employee->id) && (int) $context->employee->id) {
+                $history->id_employee = (int) $context->employee->id;
+            }
+            $history->changeIdOrderState($cancelledState, $order);
+            $history->add();
+        }
+
+        if ($order->payment !== 'CleanTalk Anti-Spam') {
+            $order->payment = 'CleanTalk Anti-Spam';
+            $order->update();
+        }
+
+        $this->addCancellationMessage($order, $message);
+    }
+
+    /**
+     * @param Cart $cart
+     * @param string $message
+     * @return void
+     */
+    private function cancelExistingOrder(Cart $cart, $message)
+    {
+        $idOrder = (int) Db::getInstance()->getValue(
+            'SELECT `id_order` FROM `' . _DB_PREFIX_ . 'orders` WHERE `id_cart` = ' . (int) $cart->id
+        );
+        $order = new Order($idOrder);
+        if (!Validate::isLoadedObject($order) || $this->isOrderAlreadyPaid($order)) {
+            return;
+        }
+
+        $cancelledState = (int) Configuration::get('PS_OS_CANCELED');
+        if ((int) $order->current_state !== $cancelledState) {
+            $history = new OrderHistory();
+            $history->id_order = (int) $order->id;
+            $context = Context::getContext();
+            if (isset($context->employee->id) && (int) $context->employee->id) {
+                $history->id_employee = (int) $context->employee->id;
+            }
+            $history->changeIdOrderState($cancelledState, $order);
+            $history->addWithemail(true);
+        }
+
+        $this->addCancellationMessage($order, $message);
+    }
+
+    /**
+     * @param Order $order
+     * @param string $message
+     * @return void
+     */
+    private function addCancellationMessage(Order $order, $message)
+    {
+        if ($message === '' || !Validate::isCleanHtml($message)) {
+            return;
+        }
+
+        $existing = Message::getMessagesByOrderId((int) $order->id, true);
+        if (is_array($existing)) {
+            foreach ($existing as $row) {
+                if (isset($row['message']) && $row['message'] === $message) {
+                    return;
+                }
+            }
+        }
+
+        $msg = new Message();
+        $msg->message = $message;
+        $msg->id_cart = (int) $order->id_cart;
+        $msg->id_customer = (int) $order->id_customer;
+        $msg->id_order = (int) $order->id;
+        $msg->private = true;
+        $msg->add();
+    }
+
+    /**
+     * @param string $comment
+     * @return void
+     */
+    private function stopBlockedOrderRequest($comment)
+    {
+        if ($this->isPaymentGatewayCallback()) {
+            if (!headers_sent()) {
+                http_response_code(200);
+                header('Content-Type: text/plain; charset=utf-8');
+            }
+            die('OK');
+        }
+
+        $this->doBlockPage($comment);
     }
 
     public function hookActionNewsletterRegistrationBefore($params)
@@ -395,7 +1037,7 @@ class CleantalkAntispam extends Module
         $params = [
             'auth_key'        => Configuration::get('CLEANTALKANTISPAM_API_KEY'),
             'agent'           => $this->engine,
-            'sender_ip'       => Helper::ipGet('real', false),
+            'sender_ip'       => !empty($data['sender_ip']) ? $data['sender_ip'] : Helper::ipGet('real', false),
             'x_forwarded_for' => Helper::ipGet('x_forwarded_for', false),
             'x_real_ip'       => Helper::ipGet('x_real_ip', false),
             'sender_info'     => $sender_info,
@@ -545,5 +1187,18 @@ class CleantalkAntispam extends Module
         }
 
         return $data;
+    }
+}
+
+/**
+ * PaymentModule used only to store an order that CleanTalk has rejected.
+ */
+class CleantalkAntispamPayment extends PaymentModule
+{
+    public function __construct()
+    {
+        $this->name = 'cleantalkantispam';
+        parent::__construct();
+        $this->active = true;
     }
 }
