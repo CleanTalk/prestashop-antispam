@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<module>
+    <name>cleantalkantispam</name>
+    <displayName><![CDATA[CleanTalk AntiSpam Protection]]></displayName>
+    <version><![CDATA[2.1.1]]></version>
+    <description><![CDATA[No CAPTCHA, no questions, no animal counting, no puzzles, no math and no spam bots. Universal AntiSpam plugin.]]></description>
+    <author><![CDATA[CleanTalk Developers Team]]></author>
+    <tab><![CDATA[administration]]></tab>
+	<confirmUninstall><![CDATA[Are you sure you want to uninstall?]]></confirmUninstall>
+    <is_configurable>1</is_configurable>
+    <need_instance>0</need_instance>
+</module>
