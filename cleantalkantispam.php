@@ -14,7 +14,7 @@ require_once __DIR__ . '/lib/autoload.php';
 
 class CleantalkAntispam extends Module
 {
-    private const PLUGIN_VERSION = '2.1.1';
+    private const PLUGIN_VERSION = '2.2.0';
 
     /**
      * Payment modules that create the order on the shop, without leaving the site.

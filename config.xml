@@ -2,7 +2,7 @@
 <module>
     <name>cleantalkantispam</name>
     <displayName><![CDATA[CleanTalk AntiSpam Protection]]></displayName>
-    <version><![CDATA[2.1.1]]></version>
+    <version><![CDATA[2.2.0]]></version>
     <description><![CDATA[No CAPTCHA, no questions, no animal counting, no puzzles, no math and no spam bots. Universal AntiSpam plugin.]]></description>
     <author><![CDATA[CleanTalk Developers Team]]></author>
     <tab><![CDATA[administration]]></tab>
